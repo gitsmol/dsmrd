@@ -1,3 +1,12 @@
+use crate::{
+    endpoints::handler,
+    reader::{spawn_dsmr_thread, ReaderData},
+};
+use hyper::{
+    service::{make_service_fn, service_fn},
+    Server,
+};
+use log::{debug, error, info, warn};
 use std::{
     convert::Infallible,
     env,
@@ -6,55 +15,30 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use hyper::{
-    service::{make_service_fn, service_fn},
-    Body, Request, Response, Server, StatusCode,
-};
-use log::{debug, error, info, warn};
-
-use crate::reader::spawn_dsmr_thread;
-
-pub mod reader;
-
-/// Handler that returns the currently stored DSMR frame as a HTTP result.
-async fn handler(
-    _req: Request<Body>,
-    mutex: Arc<Mutex<dsmr5::state::State>>,
-) -> Result<Response<Body>, hyper::http::Error> {
-    // Get a lock on the mutex containing the DSMR data
-    let data = mutex.lock().unwrap();
-    // Deserialize the data to a json string.
-    let json = serde_json::to_string(&*data);
-
-    if let Ok(json) = json {
-        // If we can get a json string, return that.
-        // Note: this should always succeed because worst case
-        // the DSMR state returns a 'null-frame' containing no data
-        // or the last frame that was succesfully stored
-        // It is up to the client to make sure the data is useful/valid.
-        Ok(Response::new(Body::from(json)))
-    } else {
-        // If not, return a HTTP error.
-        Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from("Failed to retrieve DSMR data."))
-    }
-}
+mod endpoints;
+mod reader;
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    let path = match env::args().nth(2) {
+        Some(path) => path.to_owned(),
+        None => String::from("/dev/ttyUSB0"),
+    };
+    info!("Using DSMR-reader at {:?}", path);
 
     // Create a mutex inside an Arc to store the DSMR state.
-    let dsmr_state = Arc::new(Mutex::new(dsmr5::state::State::default()));
+    let dsmr_state = Arc::new(Mutex::new(ReaderData::default()));
 
     // Spawn the thread containing the DSMR reader. This continuously retrieves
     // data from the reader and stores it in the mutex.
-    spawn_dsmr_thread(dsmr_state.clone()).await;
-    debug!("Spawned DSMR thread.");
+    match spawn_dsmr_thread(dsmr_state.clone(), path) {
+        Ok(_) => debug!("Spawned DSMR thread."),
+        Err(e) => warn!("Error spawning DSMR thread: {}", e),
+    }
 
     // A `MakeService` that produces a `Service` to handle each connection.
-    let make_service = make_service_fn(move |_| {
+    let get_last_value = make_service_fn(move |_| {
         // Clone mutex to share it with each invocation of `make_service`.
         let dsmr_state = dsmr_state.clone();
 
@@ -75,7 +59,7 @@ async fn main() {
         };
     };
 
-    let server = Server::bind(&addr).serve(make_service);
+    let server = Server::bind(&addr).serve(get_last_value);
 
     info!("Listening on http://{}", addr);
 

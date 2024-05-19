@@ -1,38 +1,92 @@
-use log::{error, info, warn};
+use log::{debug, error, info};
+use serde::Serialize;
 use serial::prelude::*;
 use std::io::Read;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, Thread};
+use std::thread;
 use std::time::Duration;
 
-struct ReaderData {
-    reader_state: ReaderState,
-    dsmr_state: dsmr5::state::State,
-    thread: Thread,
+#[derive(PartialEq, Eq, Debug, Serialize)]
+pub enum ThreadStatus {
+    Running,
+    Failed,
+    Stopping,
+    Stopped,
 }
 
-enum ReaderState {
-    Running,
-    Stopped,
-    Failed,
+pub struct ReaderData {
+    pub dsmr_state: dsmr5::state::State,
+    pub thread_status: ThreadStatus,
+    pub thread_stop_tx: Sender<bool>,
+    pub thread_stop_rx: Receiver<bool>,
+}
+
+impl Default for ReaderData {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            dsmr_state: dsmr5::state::State::default(),
+            thread_status: ThreadStatus::Stopped,
+            thread_stop_tx: tx,
+            thread_stop_rx: rx,
+            // TODO create a start/stop mechanism using mpsc instead of mutex
+        }
+    }
 }
 
 /// Spawn a thread that endlessly reads the DSMR and stores its state into a mutex.
-pub async fn spawn_dsmr_thread(mutex: Arc<Mutex<dsmr5::state::State>>) {
-    thread::spawn(move || {
-        let path = "/dev/DSMR-reader";
+pub fn spawn_dsmr_thread(mutex: Arc<Mutex<ReaderData>>, path: String) -> Result<(), std::io::Error> {
+    let reader_data = mutex.clone();
+
+    let thread = thread::Builder::new().spawn(move || {
+        debug!("DSMR reader thread spawned.");
+        // let path = "/dev/DSMR-reader";
         let mut port = serial::open(&path).expect("Failed to set serial port.");
         let _init = match serial_init(&mut port) {
-            Ok(_init) => info!("Serial port initialized."),
+            Ok(res) => info!("Serial port initialized. {:?}", res),
             Err(error) => error!("Failed to initialize serial port: {}", error),
         };
         loop {
-            if let Ok(state) = reader_get_value(&mut port) {
-                let mut mx = mutex.lock().unwrap();
-                *mx = state;
+            match reader_get_value(&mut port) {
+                Ok(state) => {
+                    debug!("DSMR reader value received.");
+                    let mut mx = reader_data.lock().unwrap();
+                    mx.dsmr_state = state;
+                    debug!("DSMR thread status: {:?}", &mx.thread_status);
+                    if mx.thread_status == ThreadStatus::Stopping {
+                        debug!("Stopping thread with status: {:?}", &mx.thread_status);
+                        mx.thread_status = ThreadStatus::Stopped;
+                        break;
+                    }
+                }
+                Err(_e) => {
+                    debug!("Unable to receive DSMR reader value.");
+                    let mut mx = reader_data.lock().unwrap();
+                    mx.thread_status = ThreadStatus::Failed;
+                    break;
+                }
             };
         }
     });
+
+    // If the thread started okay, set thread status to Running.
+    match thread {
+        Ok(_) => {
+            // Set thread status to running.
+            let mut mx = mutex.lock().unwrap();
+            mx.thread_status = ThreadStatus::Running;
+            debug!("Thread status set to running.");
+            Ok(())
+        }
+        Err(e) => {
+            // If thread start failed, set status to failed.
+            let mut mx = mutex.lock().unwrap();
+            mx.thread_status = ThreadStatus::Failed;
+            debug!("Thread status set to failed.");
+            Err(e)
+        }
+    }
 }
 
 /// Get the latest DSMR value
