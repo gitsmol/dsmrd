@@ -1,8 +1,9 @@
+use dsmr5::Readout;
 use log::{debug, error, info};
 use serde::Serialize;
 use serial::prelude::*;
-use std::io::Read;
 
+use std::io::Read;
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -32,26 +33,34 @@ impl Default for ReaderData {
 }
 
 /// Spawn a thread that endlessly reads the DSMR and stores its state in rwlock.
-/// Returns Ok() and adds thread handle to rwlock; returns Err.
 pub fn spawn_dsmr_thread(
     rwlock: Arc<RwLock<ReaderData>>,
     path: String,
-) -> Result<(), std::io::Error> {
-    let data = rwlock.clone();
-
+) -> Result<JoinHandle<()>, std::io::Error> {
     // Open the reader thread and continuously update the rwlock with
     // the DSMR data. If we fail, end the thread and set threadstatus to failed.
-    let thread = thread::Builder::new().spawn(move || {
+    thread::Builder::new().spawn(move || {
         let data = rwlock.clone();
 
+        if let Ok(mut mx) = data.write() {
+            mx.thread_status = ThreadStatus::Running;
+        }
         debug!("DSMR reader thread spawned.");
+
+        // Initialize reader
         let mut port = serial::open(&path).expect("Failed to set serial port.");
         let _init = match serial_init(&mut port) {
             Ok(res) => info!("Serial port initialized. {:?}", res),
             Err(error) => error!("Failed to initialize serial port: {}", error),
         };
+        let mut reader =
+            dsmr5::Reader::new(port.bytes().map(|b| b.expect("Failed to map reader.")));
+
+        // The reader is an iterator that yields data
         loop {
-            match reader_get_value(&mut port) {
+            let reader_data = reader.next().expect("No reader data present.");
+
+            match reader_convert_value(reader_data) {
                 Ok(state) => {
                     debug!("DSMR reader value received.");
                     if let Ok(mut mx) = data.write() {
@@ -66,27 +75,26 @@ pub fn spawn_dsmr_thread(
                     }
                 }
             };
-        }
-    });
 
-    match thread {
-        Ok(handle) => {
-            if let Ok(mut mx) = data.write() {
-                mx.thread_handle = Some(handle);
-            };
-            Ok(())
+            if let Ok(mx) = data.read() {
+                if mx.thread_status == ThreadStatus::Stopping {
+                    if let Ok(mut mx2) = data.write() {
+                        mx2.thread_status = ThreadStatus::Stopped;
+                        break;
+                    }
+                }
+            }
         }
-        Err(e) => Err(e),
-    }
+    })
 }
 
-/// Get the latest DSMR value
-fn reader_get_value<T: serial::SerialPort>(
-    port: &mut T,
+/// Convert the latest DSMR value to a dsmr state
+fn reader_convert_value(
+    // port: &mut T,
+    data: Readout,
 ) -> Result<dsmr5::state::State, dsmr5::Error> {
     // Initialize reader
-    let mut reader = dsmr5::Reader::new(port.bytes().map(|b| b.expect("Failed to map reader.")));
-    let data = reader.next().expect("No reader data present.");
+    // let mut reader = dsmr5::Reader::new(port.bytes().map(|b| b.expect("Failed to map reader.")));
     let data = match data.to_telegram() {
         Ok(data) => data,
         Err(e) => {

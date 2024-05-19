@@ -10,7 +10,7 @@ pub async fn handler(
 ) -> Result<Response<Body>, hyper::http::Error> {
     debug!("Received request: {:?}", req);
     match req.uri().to_string() {
-        u if u.starts_with("/status") => check_thread(mutex).await,
+        u if u.starts_with("/status") => get_latest_data(mutex).await,
         u if u.starts_with("/start") => start_thread(mutex).await,
         u if u.starts_with("/stop") => stop_thread(mutex).await,
         _ => get_state(mutex).await,
@@ -38,7 +38,7 @@ async fn get_state(mutex: Arc<RwLock<ReaderData>>) -> Result<Response<Body>, hyp
     }
 }
 
-async fn check_thread(
+async fn get_latest_data(
     mutex: Arc<RwLock<ReaderData>>,
 ) -> Result<Response<Body>, hyper::http::Error> {
     let data = mutex.read().expect("Failed to read RwLock...");
@@ -62,8 +62,8 @@ async fn start_thread(
         if rwlock
             .read()
             .expect("Failed to read RwLock...")
-            .thread_status
-            == ThreadStatus::Running
+            .thread_handle
+            .is_some()
         {
             debug!("Found existing thread. Not creating new thread.");
             return Response::builder()
@@ -93,23 +93,13 @@ async fn start_thread(
 async fn stop_thread(
     rwlock: Arc<RwLock<ReaderData>>,
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let error_response = Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::from("Failed to stop DSMR thread."));
-
     let ok_response = Response::builder()
         .status(StatusCode::OK)
         .body(Body::from("DMSR reader thread stopped."));
 
     // Get a lock on the mutex containing the DSMR data
     let mut data = rwlock.write().expect("Unable to write to RwLock...");
-    if data.thread_status == ThreadStatus::Running || data.thread_status == ThreadStatus::Failed {
-        // Give the signal to the thread to stop.
-        data.thread_status = ThreadStatus::Stopping;
-        // Return Ok statuscode.
-        return ok_response;
-    }
+    data.thread_status = ThreadStatus::Stopping;
 
-    // Failover
-    error_response
+    ok_response
 }
