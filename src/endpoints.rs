@@ -1,12 +1,12 @@
 use crate::reader::{spawn_dsmr_thread, ReaderData, ThreadStatus};
 use hyper::{Body, Request, Response, StatusCode};
 use log::debug;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 /// Handler that returns the currently stored DSMR frame as a HTTP result.
 pub async fn handler(
     req: Request<Body>,
-    mutex: Arc<Mutex<ReaderData>>,
+    mutex: Arc<RwLock<ReaderData>>,
 ) -> Result<Response<Body>, hyper::http::Error> {
     debug!("Received request: {:?}", req);
     match req.uri().to_string() {
@@ -17,9 +17,9 @@ pub async fn handler(
     }
 }
 
-async fn get_state(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
+async fn get_state(mutex: Arc<RwLock<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
     // Get a lock on the mutex containing the DSMR data
-    let data = mutex.lock().unwrap();
+    let data = mutex.read().expect("Failed to read RwLock...");
     // Deserialize the data to a json string.
     let json = serde_json::to_string(&data.dsmr_state);
 
@@ -38,8 +38,10 @@ async fn get_state(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hype
     }
 }
 
-async fn check_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
-    let data = mutex.lock().unwrap();
+async fn check_thread(
+    mutex: Arc<RwLock<ReaderData>>,
+) -> Result<Response<Body>, hyper::http::Error> {
+    let data = mutex.read().expect("Failed to read RwLock...");
     let json = serde_json::to_string(&data.thread_status);
     if let Ok(json) = json {
         // If we can get a json string, return that.
@@ -51,13 +53,18 @@ async fn check_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, h
     }
 }
 
-async fn start_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
+async fn start_thread(
+    rwlock: Arc<RwLock<ReaderData>>,
+) -> Result<Response<Body>, hyper::http::Error> {
     // Check if we already have a running thread.
     // Do this in a separate scope so the mutex gets unlocked/released after.
     {
-        let data = mutex.clone();
-        let data = data.lock().unwrap();
-        if data.thread_status == ThreadStatus::Running {
+        if rwlock
+            .read()
+            .expect("Failed to read RwLock...")
+            .thread_status
+            == ThreadStatus::Running
+        {
             debug!("Found existing thread. Not creating new thread.");
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -66,7 +73,7 @@ async fn start_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, h
     }
 
     // Spawn the dsmr thread and return a response.
-    match spawn_dsmr_thread(mutex, String::from("/dev/ttyUSB0")) {
+    match spawn_dsmr_thread(rwlock, String::from("/dev/ttyUSB0")) {
         Ok(_) =>
         // Return Ok statuscode.
         {
@@ -83,7 +90,9 @@ async fn start_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, h
     }
 }
 
-async fn stop_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
+async fn stop_thread(
+    rwlock: Arc<RwLock<ReaderData>>,
+) -> Result<Response<Body>, hyper::http::Error> {
     let error_response = Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .body(Body::from("Failed to stop DSMR thread."));
@@ -93,14 +102,12 @@ async fn stop_thread(mutex: Arc<Mutex<ReaderData>>) -> Result<Response<Body>, hy
         .body(Body::from("DMSR reader thread stopped."));
 
     // Get a lock on the mutex containing the DSMR data
-    if let Ok(mut data) = mutex.lock() {
-        if data.thread_status == ThreadStatus::Running || data.thread_status == ThreadStatus::Failed
-        {
-            // Give the signal to the thread to stop.
-            data.thread_status = ThreadStatus::Stopping;
-            // Return Ok statuscode.
-            return ok_response;
-        }
+    let mut data = rwlock.write().expect("Unable to write to RwLock...");
+    if data.thread_status == ThreadStatus::Running || data.thread_status == ThreadStatus::Failed {
+        // Give the signal to the thread to stop.
+        data.thread_status = ThreadStatus::Stopping;
+        // Return Ok statuscode.
+        return ok_response;
     }
 
     // Failover

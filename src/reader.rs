@@ -2,9 +2,9 @@ use log::{debug, error, info};
 use serde::Serialize;
 use serial::prelude::*;
 use std::io::Read;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread;
+
+use std::sync::{Arc, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 #[derive(PartialEq, Eq, Debug, Serialize)]
@@ -18,32 +18,33 @@ pub enum ThreadStatus {
 pub struct ReaderData {
     pub dsmr_state: dsmr5::state::State,
     pub thread_status: ThreadStatus,
-    pub thread_stop_tx: Sender<bool>,
-    pub thread_stop_rx: Receiver<bool>,
+    pub thread_handle: Option<JoinHandle<()>>,
 }
 
 impl Default for ReaderData {
     fn default() -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             dsmr_state: dsmr5::state::State::default(),
             thread_status: ThreadStatus::Stopped,
-            thread_stop_tx: tx,
-            thread_stop_rx: rx,
+            thread_handle: None,
         }
     }
 }
 
-/// Spawn a thread that endlessly reads the DSMR and stores its state into a mutex.
+/// Spawn a thread that endlessly reads the DSMR and stores its state in rwlock.
+/// Returns Ok() and adds thread handle to rwlock; returns Err.
 pub fn spawn_dsmr_thread(
-    mutex: Arc<Mutex<ReaderData>>,
+    rwlock: Arc<RwLock<ReaderData>>,
     path: String,
 ) -> Result<(), std::io::Error> {
-    let reader_data = mutex.clone();
+    let data = rwlock.clone();
 
+    // Open the reader thread and continuously update the rwlock with
+    // the DSMR data. If we fail, end the thread and set threadstatus to failed.
     let thread = thread::Builder::new().spawn(move || {
+        let data = rwlock.clone();
+
         debug!("DSMR reader thread spawned.");
-        // let path = "/dev/DSMR-reader";
         let mut port = serial::open(&path).expect("Failed to set serial port.");
         let _init = match serial_init(&mut port) {
             Ok(res) => info!("Serial port initialized. {:?}", res),
@@ -53,41 +54,29 @@ pub fn spawn_dsmr_thread(
             match reader_get_value(&mut port) {
                 Ok(state) => {
                     debug!("DSMR reader value received.");
-                    let mut mx = reader_data.lock().unwrap();
-                    mx.dsmr_state = state;
-                    debug!("DSMR thread status: {:?}", &mx.thread_status);
-                    if mx.thread_status == ThreadStatus::Stopping {
-                        debug!("Stopping thread with status: {:?}", &mx.thread_status);
-                        mx.thread_status = ThreadStatus::Stopped;
-                        break;
+                    if let Ok(mut mx) = data.write() {
+                        mx.dsmr_state = state;
                     }
                 }
-                Err(_e) => {
-                    debug!("Unable to receive DSMR reader value.");
-                    let mut mx = reader_data.lock().unwrap();
-                    mx.thread_status = ThreadStatus::Failed;
-                    break;
+                Err(e) => {
+                    debug!("Unable to receive DSMR reader value: {:?}", e);
+                    if let Ok(mut mx) = data.write() {
+                        mx.thread_status = ThreadStatus::Failed;
+                        break;
+                    }
                 }
             };
         }
     });
 
-    // If the thread started okay, set thread status to Running.
     match thread {
-        Ok(_) => {
-            // Set thread status to running.
-            let mut mx = mutex.lock().unwrap();
-            mx.thread_status = ThreadStatus::Running;
-            debug!("Thread status set to running.");
+        Ok(handle) => {
+            if let Ok(mut mx) = data.write() {
+                mx.thread_handle = Some(handle);
+            };
             Ok(())
         }
-        Err(e) => {
-            // If thread start failed, set status to failed.
-            let mut mx = mutex.lock().unwrap();
-            mx.thread_status = ThreadStatus::Failed;
-            debug!("Thread status set to failed.");
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 

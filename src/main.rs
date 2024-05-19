@@ -12,7 +12,7 @@ use std::{
     env,
     net::SocketAddr,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
 };
 
 mod endpoints;
@@ -28,7 +28,7 @@ async fn main() {
     info!("Using DSMR-reader at {:?}", path);
 
     // Create a mutex inside an Arc to store the DSMR state.
-    let dsmr_state = Arc::new(Mutex::new(ReaderData::default()));
+    let dsmr_state = Arc::new(RwLock::new(ReaderData::default()));
 
     // Spawn the thread containing the DSMR reader. This continuously retrieves
     // data from the reader and stores it in the mutex.
