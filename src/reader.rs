@@ -30,13 +30,15 @@ impl Default for ReaderData {
             thread_status: ThreadStatus::Stopped,
             thread_stop_tx: tx,
             thread_stop_rx: rx,
-            // TODO create a start/stop mechanism using mpsc instead of mutex
         }
     }
 }
 
 /// Spawn a thread that endlessly reads the DSMR and stores its state into a mutex.
-pub fn spawn_dsmr_thread(mutex: Arc<Mutex<ReaderData>>, path: String) -> Result<(), std::io::Error> {
+pub fn spawn_dsmr_thread(
+    mutex: Arc<Mutex<ReaderData>>,
+    path: String,
+) -> Result<(), std::io::Error> {
     let reader_data = mutex.clone();
 
     let thread = thread::Builder::new().spawn(move || {
