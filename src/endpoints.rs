@@ -140,12 +140,15 @@ async fn register_client(
     appdata: Arc<AppData>,
     req: Request<Body>,
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let Ok(remote_addr) = parse_client_addr(req).await else {
-        return Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("Error: failed to register client.",)));
+    let remote_addr = match parse_client_addr(req).await {
+        Ok(res) => res,
+        Err(e) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!("Error: {}", e)))
+                .unwrap())
+        }
     };
-    debug!("Registering client {}", remote_addr);
 
     match appdata.register_client(remote_addr) {
         Ok(_) =>
@@ -171,11 +174,16 @@ async fn unregister_client(
     appdata: Arc<AppData>,
     req: Request<Body>,
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let Ok(remote_addr) = parse_client_addr(req).await else {
-        return Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("Error: failed to unregister client.",)));
+    let remote_addr = match parse_client_addr(req).await {
+        Ok(res) => res,
+        Err(e) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!("Error: {}", e)))
+                .unwrap())
+        }
     };
+
     debug!("Unregistering client {}", remote_addr);
 
     match appdata.unregister_client(remote_addr) {
