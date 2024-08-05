@@ -4,9 +4,12 @@ use serde::Serialize;
 use serial::prelude::*;
 
 use std::io::Read;
+
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+use crate::appdata::{self, AppData};
 
 #[derive(PartialEq, Eq, Debug, Serialize)]
 pub enum ThreadStatus {
@@ -32,8 +35,10 @@ impl Default for ReaderData {
     }
 }
 
-/// Spawn a thread that endlessly reads the DSMR and stores its state in rwlock.
+/// Spawn a thread that endlessly reads the DSMR, stores its state in rwlock and notifies
+/// the udp sender.
 pub fn spawn_dsmr_thread(
+    appdata: Arc<AppData>,
     rwlock: Arc<RwLock<ReaderData>>,
     path: String,
 ) -> Result<JoinHandle<()>, std::io::Error> {
@@ -65,6 +70,7 @@ pub fn spawn_dsmr_thread(
                     debug!("DSMR reader value received.");
                     if let Ok(mut mx) = data.write() {
                         mx.dsmr_state = state;
+                        appdata.emit_event();
                     }
                 }
                 Err(e) => {

@@ -1,6 +1,6 @@
 [package]
 name = "dsmrd"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,3 +18,5 @@ env_logger = "0.10.0"
 "dsmr5" = "0.2.2"
 "serial" = "0.4"
 "serial-unix" = "0.4"
+event-listener = "5.3.1"
+url = "2.5.2"

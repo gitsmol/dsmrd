@@ -1,27 +1,38 @@
-use crate::reader::{spawn_dsmr_thread, ReaderData, ThreadStatus};
+use crate::{
+    appdata::AppData,
+    reader::{spawn_dsmr_thread, ReaderData, ThreadStatus},
+};
 use hyper::{Body, Request, Response, StatusCode};
 use log::debug;
-use std::sync::{Arc, RwLock};
+use std::{
+    error::Error,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 
-/// Handler that returns the currently stored DSMR frame as a HTTP result.
+/// Handler for all incoming http requests
 pub async fn handler(
     req: Request<Body>,
-    mutex: Arc<RwLock<ReaderData>>,
+    data: Arc<RwLock<ReaderData>>,
+    appdata: Arc<AppData>,
 ) -> Result<Response<Body>, hyper::http::Error> {
     debug!("Received request: {:?}", req);
     match req.uri().to_string() {
-        u if u.starts_with("/status") => get_latest_data(mutex).await,
-        u if u.starts_with("/start") => start_thread(mutex).await,
-        u if u.starts_with("/stop") => stop_thread(mutex).await,
-        _ => get_state(mutex).await,
+        u if u.starts_with("/status") => get_latest_data(data).await,
+        u if u.starts_with("/start") => start_thread(appdata, data).await,
+        u if u.starts_with("/stop") => stop_thread(data).await,
+        u if u.starts_with("/register") => register_client(appdata, req).await,
+        u if u.starts_with("/unregister") => unregister_client(appdata, req).await,
+        u if u.starts_with("/list") => list_clients(appdata).await,
+        _ => get_state(data).await,
     }
 }
 
-async fn get_state(mutex: Arc<RwLock<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
+async fn get_state(data: Arc<RwLock<ReaderData>>) -> Result<Response<Body>, hyper::http::Error> {
     // Get a lock on the mutex containing the DSMR data
-    let data = mutex.read().expect("Failed to read RwLock...");
+    let content = data.read().expect("Failed to read RwLock...");
     // Deserialize the data to a json string.
-    let json = serde_json::to_string(&data.dsmr_state);
+    let json = serde_json::to_string(&content.dsmr_state);
 
     if let Ok(json) = json {
         // If we can get a json string, return that.
@@ -54,6 +65,7 @@ async fn get_latest_data(
 }
 
 async fn start_thread(
+    appdata: Arc<AppData>,
     rwlock: Arc<RwLock<ReaderData>>,
 ) -> Result<Response<Body>, hyper::http::Error> {
     // Check if we already have a running thread.
@@ -73,7 +85,7 @@ async fn start_thread(
     }
 
     // Spawn the dsmr thread and return a response.
-    match spawn_dsmr_thread(rwlock, String::from("/dev/ttyUSB0")) {
+    match spawn_dsmr_thread(appdata, rwlock, String::from("/dev/ttyUSB0")) {
         Ok(_) =>
         // Return Ok statuscode.
         {
@@ -102,4 +114,104 @@ async fn stop_thread(
     data.thread_status = ThreadStatus::Stopping;
 
     ok_response
+}
+
+async fn list_clients(appdata: Arc<AppData>) -> Result<Response<Body>, hyper::http::Error> {
+    match appdata.list_clients() {
+        Ok(res) =>
+        // Return Ok statuscode.
+        {
+            let mut response_string = "Currently registered clients are\n".to_string();
+            response_string.extend(res);
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(response_string))
+        }
+        Err(e) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(format!(
+                "Error: failed to provide client register. {}",
+                e
+            ))),
+    }
+}
+
+async fn register_client(
+    appdata: Arc<AppData>,
+    req: Request<Body>,
+) -> Result<Response<Body>, hyper::http::Error> {
+    let Ok(remote_addr) = parse_client_addr(req).await else {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(format!("Error: failed to register client.",)));
+    };
+    debug!("Registering client {}", remote_addr);
+
+    match appdata.register_client(remote_addr) {
+        Ok(_) =>
+        // Return Ok statuscode.
+        {
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!(
+                    "Succesfully registered client {}",
+                    remote_addr
+                )))
+        }
+        Err(e) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(format!(
+                "Error: failed to register client {}: {}",
+                remote_addr, e,
+            ))),
+    }
+}
+
+async fn unregister_client(
+    appdata: Arc<AppData>,
+    req: Request<Body>,
+) -> Result<Response<Body>, hyper::http::Error> {
+    let Ok(remote_addr) = parse_client_addr(req).await else {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(format!("Error: failed to unregister client.",)));
+    };
+    debug!("Unregistering client {}", remote_addr);
+
+    match appdata.unregister_client(remote_addr) {
+        Ok(_) =>
+        // Return Ok statuscode.
+        {
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!(
+                    "Succesfully unregistered client {}",
+                    remote_addr
+                )))
+        }
+        Err(e) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(format!(
+                "Error: failed to unregister client {}: {}",
+                remote_addr, e,
+            ))),
+    }
+}
+
+/// Helper function to parse requests to (un)register into SocketAddr using ip and port.
+async fn parse_client_addr(req: Request<Body>) -> Result<SocketAddr, Box<dyn Error>> {
+    let query = req.uri().query().ok_or("No query string found")?;
+
+    let params: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+
+    let ip = params.get("ip").ok_or("No IP parameter found")?;
+    let port = params.get("port").ok_or("No port parameter found")?;
+
+    let addr = format!("{}:{}", ip, port);
+    let socket_addr: SocketAddr = addr.parse()?;
+
+    Ok(socket_addr)
 }
